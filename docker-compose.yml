@@ -1,0 +1,18 @@
+services:
+  mcp-server:
+    build: .
+    container_name: mcp-server
+    ports:
+      - "3000:3000"
+    env_file: .env
+    depends_on:
+      - json-api
+
+  json-api:
+    image: clue/json-server
+    container_name: json-api
+    volumes:
+      - ./mock.json:/data/db.json
+    command: ["--watch", "/data/db.json"]
+    ports:
+      - "4000:80"

@@ -1,0 +1,10 @@
+{
+  "posts": [
+    { "id": 1, "title": "Hello MCP", "author": "luc" },
+    { "id": 2, "title": "Demo JSON Server", "author": "chatgpt" }
+  ],
+  "users": [
+    { "id": 1, "name": "Alice" },
+    { "id": 2, "name": "Bob" }
+  ]
+}
