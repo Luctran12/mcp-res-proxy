@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"compress/gzip"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -9,7 +10,8 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	
+	"strings"
+
 	"time"
 )
 
@@ -45,7 +47,7 @@ func ProxyHandler(cfg Config) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 
-		// 1️⃣ Xác định base URL (ưu tiên query param `?base=`, fallback sang config)
+		// 1️⃣ Lấy base URL từ query param hoặc config
 		base := r.URL.Query().Get("base")
 		if base == "" {
 			base = cfg.BaseURL
@@ -54,35 +56,29 @@ func ProxyHandler(cfg Config) http.Handler {
 			http.Error(w, "missing ?base=API_URL parameter or TARGET_BASE_URL config", http.StatusBadRequest)
 			return
 		}
-
-		// 2️⃣ Validate base URL
 		_, err := url.ParseRequestURI(base)
 		if err != nil {
 			http.Error(w, "invalid base URL", http.StatusBadRequest)
 			return
 		}
 
-		// 3️⃣ Ghép target URL (bỏ prefix `/mcp`)
+		// 2️⃣ Xây target URL (bỏ prefix /mcp)
 		target := fmt.Sprintf("%s%s", base, r.URL.Path[len("/mcp"):])
-
-		// Loại bỏ query param `base` để không forward sang API gốc
 		q := r.URL.Query()
 		q.Del("base")
 		if len(q) > 0 {
 			target += "?" + q.Encode()
 		}
 
-		// 4️⃣ Tạo request mới tới API gốc
+		// 3️⃣ Tạo request mới tới API gốc
 		req, err := http.NewRequest(r.Method, target, r.Body)
-        
 		if err != nil {
 			respondError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		// Copy toàn bộ headers từ request gốc
 		req.Header = r.Header.Clone()
 
-		// 5️⃣ Nếu có cấu hình Auth thì auto-attach vào header
+		// 4️⃣ Auto attach Auth nếu có config
 		switch cfg.AuthType {
 		case "bearer":
 			req.Header.Set("Authorization", "Bearer "+cfg.Token)
@@ -91,7 +87,7 @@ func ProxyHandler(cfg Config) http.Handler {
 			req.Header.Set("Authorization", "Basic "+auth)
 		}
 
-		// 6️⃣ Gửi request tới API gốc
+		// 5️⃣ Gửi request tới API gốc
 		client := &http.Client{}
 		resp, err := client.Do(req)
 		if err != nil {
@@ -101,57 +97,73 @@ func ProxyHandler(cfg Config) http.Handler {
 		}
 		defer resp.Body.Close()
 
-		// Đọc toàn bộ body trả về
-		body, err := io.ReadAll(resp.Body)
-        log.Printf("body: %v", body)
+		// 6️⃣ Nếu Content-Encoding = gzip thì giải nén
+		var reader io.Reader = resp.Body
+		if resp.Header.Get("Content-Encoding") == "gzip" {
+			gz, err := gzip.NewReader(resp.Body)
+			if err != nil {
+				respondError(w, http.StatusInternalServerError, "failed to decode gzip: "+err.Error())
+				return
+			}
+			defer gz.Close()
+			reader = gz
+		}
+
+		// Đọc toàn bộ body
+		body, err := io.ReadAll(reader)
 		if err != nil {
 			respondError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 
-		// 7️⃣ Log thông tin chi tiết request/response
+		// 7️⃣ Log request trace
 		duration := time.Since(start)
 		log.Printf("[MCP] %s %s -> %d (%v)", r.Method, target, resp.StatusCode, duration)
 
-		// 8️⃣ Tuỳ chế độ: bọc JSON hay giữ nguyên
-		if cfg.WrapResponse {
-            log.Print("Wrapping response")
-			// --- Chế độ bọc JSON chuẩn hoá ---
-			w.Header().Set("Content-Type", "application/json")
-
-			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-				// Nếu status thành công → parse JSON để wrap
-				var data interface{}
-				if err := json.Unmarshal(body, &data); err != nil {
-                log.Printf("❌ JSON unmarshal error: %v", err)
-                log.Printf("raw body: %s", string(body))
-            } else {
-                log.Printf("✅ Parsed data: %#v", data)
-            }
-				json.NewEncoder(w).Encode(ProxyResponse{Success: true, Data: data})
-			} else {
-				// Nếu lỗi → wrap thành success=false + error
-				json.NewEncoder(w).Encode(ProxyResponse{Success: false, Error: string(body)})
-			}
-			return
-		}
-
-		// --- Chế độ giữ nguyên response gốc ---
-		// Forward headers y nguyên
+		// 8️⃣ Forward headers từ API gốc (bỏ Content-Length vì body đã đọc lại)
 		for k, v := range resp.Header {
+			if strings.ToLower(k) == "content-length" {
+				continue
+			}
 			for _, vv := range v {
 				w.Header().Add(k, vv)
 			}
 		}
-		// Forward status code
-		w.WriteHeader(resp.StatusCode)
-		// Forward body y nguyên
-		_, err = w.Write(body)
-		if err != nil {
-			log.Printf("[MCP] error writing response: %v", err)
+
+		// 9️⃣ Trả response (wrap hoặc raw)
+		if cfg.WrapResponse {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				var data interface{}
+				if err := json.Unmarshal(body, &data); err != nil {
+					respondError(w, http.StatusInternalServerError, "JSON unmarshal error: "+err.Error())
+					log.Printf("❌ JSON unmarshal error: %v", err)
+					return
+				}
+
+				// Log preview thay vì full body
+				preview := string(body)
+				if len(preview) > 200 {
+					preview = preview[:200] + "..."
+				}
+				log.Printf("response preview: %s", preview)
+
+				json.NewEncoder(w).Encode(ProxyResponse{Success: true, Data: data})
+			} else {
+				json.NewEncoder(w).Encode(ProxyResponse{Success: false, Error: string(body)})
+			}
+		} else {
+			// giữ nguyên body gốc
+			w.WriteHeader(resp.StatusCode)
+			_, err = w.Write(body)
+			if err != nil {
+				log.Printf("[MCP] error writing response: %v", err)
+			}
 		}
 	})
 }
+
 
 
 
