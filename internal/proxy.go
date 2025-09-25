@@ -100,6 +100,7 @@ func ProxyHandler(cfg Config) http.Handler {
 		// 6️⃣ Nếu Content-Encoding = gzip thì giải nén
 		var reader io.Reader = resp.Body
 		if resp.Header.Get("Content-Encoding") == "gzip" {
+            log.Printf("mode: gzip")
 			gz, err := gzip.NewReader(resp.Body)
 			if err != nil {
 				respondError(w, http.StatusInternalServerError, "failed to decode gzip: "+err.Error())
@@ -107,6 +108,10 @@ func ProxyHandler(cfg Config) http.Handler {
 			}
 			defer gz.Close()
 			reader = gz
+
+            // ❌ Đừng forward Content-Encoding vì body đã được giải nén
+            resp.Header.Del("Content-Encoding")
+            resp.Header.Del("Content-Length")
 		}
 
 		// Đọc toàn bộ body
