@@ -2,35 +2,33 @@ package internal
 
 import (
 	"os"
-
-	"github.com/joho/godotenv"
 )
 
 type Config struct {
-	Port     string
-	BaseURL  string // base mặc định, có thể override qua query param ?base=
-	AuthType string
-	Token    string
-	User     string
-	Pass     string
+	Port         string
+	BaseURL      string
+	AuthType     string
+	Token        string
+	User         string
+	Pass         string
+	WrapResponse bool
 }
 
 func LoadConfig() Config {
-	_ = godotenv.Load()
-
 	return Config{
-		Port:     getEnv("PORT", "3000"),
-		BaseURL:  getEnv("TARGET_BASE_URL", ""), // nếu rỗng thì user phải truyền query base
-		AuthType: getEnv("AUTH_TYPE", "none"),
-		Token:    os.Getenv("AUTH_TOKEN"),
-		User:     os.Getenv("AUTH_USER"),
-		Pass:     os.Getenv("AUTH_PASS"),
+		Port:         getEnv("PORT", "3000"),
+		BaseURL:      getEnv("TARGET_BASE_URL", "https://jsonplaceholder.typicode.com"),
+		AuthType:     getEnv("AUTH_TYPE", ""), // bearer | basic | none
+		Token:        os.Getenv("AUTH_TOKEN"),
+		User:         os.Getenv("AUTH_USER"),
+		Pass:         os.Getenv("AUTH_PASS"),
+		WrapResponse: getEnv("WRAP_RESPONSE", "true") == "true", // <-- thêm flag này
 	}
 }
 
-func getEnv(key, fallback string) string {
-	if value, ok := os.LookupEnv(key); ok {
-		return value
+func getEnv(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
 	}
-	return fallback
+	return def
 }
